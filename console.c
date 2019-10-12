@@ -128,6 +128,10 @@ panic(char *s)
 #define CRTPORT 0x3d4
 static ushort *crt = (ushort*)P2V(0xb8000);  // CGA memory
 
+int line_length = 0;		// Global variable set by Me.
+int line_pos = 0;
+int cursor_in_line = 0;
+
 static void
 cgaputc(int c)
 {
@@ -138,13 +142,36 @@ cgaputc(int c)
   pos = inb(CRTPORT+1) << 8;
   outb(CRTPORT, 15);
   pos |= inb(CRTPORT+1);
+  int is_back_space = 0;
+  
+  int space = ' ';
+  int dollar_sign = '$';
+  int offset = crt[pos - pos%80] == ((dollar_sign&0xff) | 0x0700) && crt[pos - (pos%80 - 1)] == ((space&0xff) | 0x0700) ? 2 : 0;
 
   if(c == '\n')
     pos += 80 - pos%80;
   else if(c == BACKSPACE){
     if(pos > 0) --pos;
-  } else
-    crt[pos++] = (c&0xff) | 0x0700;  // black on white
+    is_back_space = 1;
+  }
+  else if(c == '}')
+    pos += -pos%80 + offset + line_length;
+  else if(c == '{')
+	  pos -= pos%80 - offset;
+  else
+  {//abcd
+ 	int row_number = pos/80 + 1;
+  	int column_number = pos - row_number*80;
+	if (line_length - 1 != column_number)
+	{
+		int i;
+		for (i = row_number*80 + line_length; i > pos; --i)
+			crt[i] = crt[i - 1];
+	}
+
+	crt[pos++] = (c&0xff) | 0x0700;  // black on white
+  }
+  
 
   if(pos < 0 || pos > 25*80)
     panic("pos under/overflow");
@@ -159,7 +186,15 @@ cgaputc(int c)
   outb(CRTPORT+1, pos>>8);
   outb(CRTPORT, 15);
   outb(CRTPORT+1, pos);
-  crt[pos] = ' ' | 0x0700;
+  int row_number = pos/80;
+  int column_number = pos - row_number*80 - 2;
+  if ((c != '{' && line_length == column_number) || is_back_space){
+  	crt[pos] = ' ' | 0x0700;
+    for(int i = pos; i < pos + line_length - column_number; ++i){
+      crt[i] = crt[i+1];
+      crt[i+1] = ' ' | 0x0700;
+    }
+  }
 }
 
 void
@@ -201,24 +236,68 @@ consoleintr(int (*getc)(void))
       doprocdump = 1;
       break;
     case C('U'):  // Kill line.
-      while(input.e != input.w &&
-            input.buf[(input.e-1) % INPUT_BUF] != '\n'){
+    case 3:
+      while (input.e < line_pos)
+      {
+        ++input.e;
+        cgaputc('}');
+      }
+      while(input.e != input.w && input.buf[(input.e-1) % INPUT_BUF] != '\n'){
         input.e--;
+	      line_pos--;
+        line_length--;
         consputc(BACKSPACE);
       }
       break;
     case C('H'): case '\x7f':  // Backspace
       if(input.e != input.w){
         input.e--;
+		    line_pos--;
+        line_length--;
         consputc(BACKSPACE);
+        if (input.e != line_pos)
+        {
+          int i;
+          for (i = line_pos; i > input.e; --i)
+            input.buf[(i-1) % INPUT_BUF] = input.buf[(i) % INPUT_BUF];
+	      }
       }
       break;
+	case '{':
+		if(input.e != input.w)
+		{
+		  while(input.e != input.w && input.buf[(input.e-1) % INPUT_BUF] != '\n')
+        input.e--;		// line_pos shouldn't be changed here.
+		cgaputc(c);
+      	}
+		break;
+  case '}':
+    while (input.e < line_pos)
+    {
+      ++input.e;
+      cgaputc(c);
+    }
+    break;
     default:
       if(c != 0 && input.e-input.r < INPUT_BUF){
         c = (c == '\r') ? '\n' : c;
+
+        if (c == '\n' || c == C('D') || input.e == input.r+INPUT_BUF)
+          input.e = line_pos;
+        else if (input.e != line_pos)
+        {
+          int i;
+          for (i = line_pos; i > input.e; --i)
+            input.buf[i % INPUT_BUF] = input.buf[(i-1) % INPUT_BUF];
+	      }
+
         input.buf[input.e++ % INPUT_BUF] = c;
+		    line_pos++;
+        line_length++;
         consputc(c);
         if(c == '\n' || c == C('D') || input.e == input.r+INPUT_BUF){
+          
+          line_length = 0;
           input.w = input.e;
           wakeup(&input.r);
         }
